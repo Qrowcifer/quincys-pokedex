@@ -1708,6 +1708,12 @@
                 bigSpriteGifData = state.bigSpriteGifData ? base64ToArrayBuffer(state.bigSpriteGifData) : null;
                 miniSpriteGifData = state.miniSpriteGifData ? base64ToArrayBuffer(state.miniSpriteGifData) : null;
 
+                // Keep the animated-GIF export control visible when a GIF sprite was
+                // restored from autosave. The upload change handler normally does this.
+                const restoredGifBtn = document.getElementById('exportGifBtn');
+                if (bigSpriteIsGif && bigSpriteGifData) restoredGifBtn.classList.add('visible');
+                else restoredGifBtn.classList.remove('visible');
+
                 setAutosaveStatus('Restored previous entry', true);
                 return true;
             } catch (err) {
@@ -1962,7 +1968,9 @@
             ctx.imageSmoothingEnabled = true;
             ctx.drawImage(cardCanvas, 0, 0);
 
-            const filename = (document.getElementById('pokeName').value || 'pokemon').replace(/\s+/g, '_') + '_dex_entry.png';
+            const dexNum = (document.getElementById('dexNum').value || '0000').replace(/\s+/g, '');
+            const pokeName = (document.getElementById('pokeName').value || 'pokemon').replace(/\s+/g, '_');
+            const filename = dexNum + '_' + pokeName + '.png';
             final.toBlob(blob => {
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
@@ -2016,11 +2024,15 @@
                 transparentIndex: -1,
                 disposal: 0
             };
-            // Canvas to accumulate frames for disposal method 1
+
+            // This canvas holds the actual GIF "screen". GIF frames are often
+            // only small rectangles, so each frame must be composited on top
+            // of the previous screen rather than treated as a complete image.
             const accumCanvas = document.createElement('canvas');
             accumCanvas.width = screenW;
             accumCanvas.height = screenH;
             const accumCtx = accumCanvas.getContext('2d');
+            accumCtx.clearRect(0, 0, screenW, screenH);
 
             while (pos < bytes.length) {
                 const sentinel = readU8();
@@ -2031,7 +2043,7 @@
                     if (label === 0xF9) { // graphic control
                         readU8(); // block size = 4
                         const p = readU8();
-                        gce.disposal = (p >> 3) & 0x7;
+                        gce.disposal = (p >> 2) & 0x7;
                         gce.delay = readU16(); // centiseconds
                         const ti = readU8();
                         gce.transparentIndex = (p & 1) ? ti : -1;
@@ -2067,8 +2079,25 @@
                     }
                     const indices = lzwDecode(minCode, new Uint8Array(dataBytes));
 
-                    // Build RGBA for this frame
-                    const framePixels = new Uint8ClampedArray(imgW * imgH * 4);
+                    // GIF disposal method 3 means "restore to previous".
+                    // Save the screen BEFORE drawing this frame so it can be
+                    // restored after the frame has been captured.
+                    let savedBeforeFrame = null;
+                    if (gce.disposal === 3) {
+                        savedBeforeFrame = accumCtx.getImageData(0, 0, screenW, screenH);
+                    }
+
+                    // Build a transparent RGBA image for just this frame's
+                    // rectangle. Transparent GIF pixels are left transparent.
+                    // We then use drawImage() for compositing, because
+                    // putImageData() would overwrite existing pixels with
+                    // transparent black instead of leaving them untouched.
+                    const frameCanvas = document.createElement('canvas');
+                    frameCanvas.width = imgW;
+                    frameCanvas.height = imgH;
+                    const frameCtx = frameCanvas.getContext('2d');
+                    const frameImage = frameCtx.createImageData(imgW, imgH);
+                    const framePixels = frameImage.data;
                     const interlaceRows = interlace ?
                         buildInterlaceMap(imgH) :
                         Array.from({
@@ -2080,36 +2109,46 @@
                         for (let col = 0; col < imgW; col++) {
                             const idx = indices[srcRow * imgW + col];
                             const dst = (row * imgW + col) * 4;
-                            if (idx === gce.transparentIndex) {
-                                framePixels[dst] = 0;
-                                framePixels[dst + 1] = 0;
-                                framePixels[dst + 2] = 0;
-                                framePixels[dst + 3] = 0;
-                            } else {
-                                framePixels[dst] = ct[idx * 3];
-                                framePixels[dst + 1] = ct[idx * 3 + 1];
-                                framePixels[dst + 2] = ct[idx * 3 + 2];
-                                framePixels[dst + 3] = 255;
-                            }
+
+                            // A transparent GIF pixel means "leave the
+                            // destination pixel alone", not "replace it with
+                            // transparent black".
+                            if (idx === gce.transparentIndex) continue;
+
+                            framePixels[dst] = ct[idx * 3];
+                            framePixels[dst + 1] = ct[idx * 3 + 1];
+                            framePixels[dst + 2] = ct[idx * 3 + 2];
+                            framePixels[dst + 3] = 255;
                         }
                     }
 
-                    // Composite onto accumulation canvas
-                    if (gce.disposal === 2) {
-                        accumCtx.clearRect(imgLeft, imgTop, imgW, imgH);
-                    }
-                    const id = new ImageData(framePixels, imgW, imgH);
-                    accumCtx.putImageData(id, imgLeft, imgTop);
+                    frameCtx.putImageData(frameImage, 0, 0);
 
-                    // Snapshot full screen
+                    // Composite the frame onto the existing GIF screen.
+                    accumCtx.drawImage(frameCanvas, imgLeft, imgTop);
+
+                    // Capture the frame AFTER compositing it, before applying
+                    // its disposal method.
                     const snap = accumCtx.getImageData(0, 0, screenW, screenH);
 
                     frames.push({
                         width: screenW,
                         height: screenH,
                         delay: gce.delay * 10, // ms
-                        pixels: snap.data,
+                        pixels: new Uint8ClampedArray(snap.data),
                     });
+
+                    // Apply the CURRENT frame's disposal AFTER it has been
+                    // captured. This state is what the next GIF frame should
+                    // start from.
+                    if (gce.disposal === 2) {
+                        // For the transparent sprite GIFs used by this app,
+                        // restoring the affected rectangle to transparent is
+                        // the desired equivalent of GIF disposal "background".
+                        accumCtx.clearRect(imgLeft, imgTop, imgW, imgH);
+                    } else if (gce.disposal === 3 && savedBeforeFrame) {
+                        accumCtx.putImageData(savedBeforeFrame, 0, 0);
+                    }
 
                     gce = {
                         delay: 10,
@@ -2139,58 +2178,114 @@
         }
 
         function lzwDecode(minCodeSize, data) {
+            // GIF LZW decoder.
+            //
+            // Important details:
+            //   - Codes are packed LSB-first.
+            //   - The dictionary starts with clear + EOI codes.
+            //   - The code width grows as the NEXT dictionary code crosses
+            //     a power-of-two boundary.
+            //   - A clear code completely resets the dictionary and code width.
+            //   - The special KwKwK case (code === nextCode) is valid and must
+            //     be decoded as previousEntry + previousEntry[0].
+            //
+            // This is deliberately kept independent of the GIF compositor so
+            // that malformed LZW data cannot leave stale state from a previous
+            // frame behind.
+            if (!Number.isInteger(minCodeSize) || minCodeSize < 2 || minCodeSize > 8) {
+                throw new Error('Invalid GIF LZW minimum code size: ' + minCodeSize);
+            }
+
             const clearCode = 1 << minCodeSize;
-            const eoi = clearCode + 1;
-            let codeSize = minCodeSize + 1;
-            let dict = [];
+            const eoiCode = clearCode + 1;
+            const maxCode = 4095;
+
+            let codeSize;
+            let nextCode;
+            let dictionary;
+
             const reset = () => {
-                dict = [];
-                for (let i = 0; i < clearCode; i++) dict.push([i]);
-                dict.push([]);
-                dict.push([]); // CC, EOI placeholders
                 codeSize = minCodeSize + 1;
+                nextCode = eoiCode + 1;
+                dictionary = new Array(maxCode + 1);
+
+                for (let i = 0; i < clearCode; i++) {
+                    dictionary[i] = [i];
+                }
+                // clearCode and eoiCode are control codes, not dictionary entries.
+                dictionary[clearCode] = null;
+                dictionary[eoiCode] = null;
             };
+
             reset();
 
-            // Bit reader
-            let bits = 0,
-                bitCount = 0,
-                bytePos = 0;
+            // GIF image data stores each code least-significant-bit first.
+            let bitBuffer = 0;
+            let bitCount = 0;
+            let bytePos = 0;
+
             const readCode = () => {
                 while (bitCount < codeSize && bytePos < data.length) {
-                    bits |= data[bytePos++] << bitCount;
+                    bitBuffer |= data[bytePos++] << bitCount;
                     bitCount += 8;
                 }
-                const code = bits & ((1 << codeSize) - 1);
-                bits >>= codeSize;
+
+                // A truncated data stream should terminate cleanly rather than
+                // manufacturing a code from missing bits.
+                if (bitCount < codeSize) return null;
+
+                const mask = (1 << codeSize) - 1;
+                const code = bitBuffer & mask;
+                bitBuffer >>>= codeSize;
                 bitCount -= codeSize;
                 return code;
             };
 
             const output = [];
-            let prev = null;
-            let code;
+            let previousEntry = null;
+
             while (true) {
-                code = readCode();
-                if (code === eoi) break;
+                const code = readCode();
+                if (code === null || code === eoiCode) break;
+
                 if (code === clearCode) {
                     reset();
-                    prev = null;
+                    previousEntry = null;
                     continue;
                 }
+
                 let entry;
-                if (code < dict.length) {
-                    entry = dict[code];
-                } else if (code === dict.length && prev !== null) {
-                    entry = prev.concat(prev[0]);
-                } else break;
-                for (const v of entry) output.push(v);
-                if (prev !== null) {
-                    dict.push(prev.concat(entry[0]));
-                    if (dict.length === (1 << codeSize) && codeSize < 12) codeSize++;
+
+                if (code < nextCode && dictionary[code] !== undefined && dictionary[code] !== null) {
+                    // Normal dictionary lookup.
+                    entry = dictionary[code];
+                } else if (code === nextCode && previousEntry !== null) {
+                    // GIF LZW's KwKwK special case.
+                    entry = previousEntry.concat(previousEntry[0]);
+                } else {
+                    // Invalid code. Stop instead of emitting corrupt pixels.
+                    throw new Error('Invalid GIF LZW code ' + code + ' (next=' + nextCode + ', size=' + codeSize + ')');
                 }
-                prev = entry;
+
+                for (let i = 0; i < entry.length; i++) {
+                    output.push(entry[i]);
+                }
+
+                if (previousEntry !== null && nextCode <= maxCode) {
+                    dictionary[nextCode] = previousEntry.concat(entry[0]);
+                    nextCode++;
+
+                    // The decoder must increase its code width only AFTER the
+                    // new dictionary entry has crossed the current width's
+                    // boundary. This keeps it synchronized with the encoder.
+                    if (nextCode === (1 << codeSize) && codeSize < 12) {
+                        codeSize++;
+                    }
+                }
+
+                previousEntry = entry;
             }
+
             return output;
         }
 
@@ -2252,7 +2347,7 @@
                 byte(0x21);
                 byte(0xF9);
                 byte(4);
-                byte(0x00); // no disposal, no transparency
+                byte(0x00); 
                 word(Math.round(fd / 10)); // delay in centiseconds
                 byte(0);
                 byte(0);
@@ -2296,10 +2391,6 @@
             for (let i = 0; i < data.length; i += 4)
                 pixels.push([data[i], data[i + 1], data[i + 2]]);
 
-            // Building the palette from every pixel gets very slow on large export
-            // scales (median-cut splitting is superlinear). A random sample of a
-            // few thousand pixels is enough to pick a representative 256-color
-            // palette; we still map every pixel to it below at full quality.
             const MAX_SAMPLE = 12000;
             let sample = pixels;
             if (pixels.length > MAX_SAMPLE) {
@@ -2448,7 +2539,7 @@
         }
 
         async function prepareSpriteFrame(img, frameDataUrl) {
-            if (!img || !frameDataUrl) return;
+            if (!img || !frameDataUrl) return img;
 
             const frameImg = await loadImage(frameDataUrl);
             const canvas = document.createElement('canvas');
@@ -2459,119 +2550,126 @@
             ctx.imageSmoothingEnabled = false;
             ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
 
-            const upscaledUrl = canvas.toDataURL();
-            img.src = upscaledUrl;
+            const upscaledUrl = canvas.toDataURL('image/png');
+            const freshImg = img.cloneNode(true);
+
+            freshImg.removeAttribute('srcset');
+            freshImg.removeAttribute('sizes');
+            freshImg.src = upscaledUrl;
+
+            img.replaceWith(freshImg);
+
             await loadImage(upscaledUrl);
-            if (img.decode) {
+            if (freshImg.decode) {
                 try {
-                    await img.decode();
+                    await freshImg.decode();
                 } catch (e) {}
             }
+
+            void freshImg.offsetWidth;
+            return freshImg;
         }
 
-        async function compositeFrame(card, frameDataUrl, scale, bgSrc, maskSrc, accentColor, miniFrameDataUrl = null) {
-            const W = 560 * scale;
-            const H = 315 * scale;
+        async function compositeFrame(frameDataUrl, frameIndex, totalFrames, scale = 2) {
 
-            // Sprite frames
-            const spriteImg = document.getElementById('spriteArea').querySelector('img');
-            const miniSpriteImg = document.getElementById('miniSpriteBox').querySelector('img');
-            const origSrc = spriteImg ? spriteImg.src : null;
-            const miniOrigSrc = miniSpriteImg ? miniSpriteImg.src : null;
+  const card = document.getElementById('dex-card');
+  if (!card) throw new Error('Card preview not found');
 
-            await prepareSpriteFrame(spriteImg, frameDataUrl);
-            await prepareSpriteFrame(miniSpriteImg, miniFrameDataUrl);
+  return await html2canvas(card, {
+    scale,
+    useCORS: true,
+    backgroundColor: null,
+    imageTimeout: 0
+  });
+}
 
-            const bgTint = document.getElementById('bgTint');
-            const bgImg = document.getElementById('bgImg');
-            card.style.transform = 'scale(1)';
-            bgTint.style.display = 'none';
-            bgImg.style.display = 'none';
+async function renderStaticCardForGif(scale = 2) {
+  const card = document.getElementById('dex-card');
+  if (!card) throw new Error('Card preview not found');
 
-            // Rasterize secondary images.
-            const allImgs = Array.from(card.querySelectorAll('img'));
-            const otherImgs = allImgs.filter(img => img !== spriteImg && img !== miniSpriteImg);
-            const otherOrigSrcs = otherImgs.map(img => img.src);
+  const targets = [
+    document.getElementById('spriteArea'),
+    document.getElementById('miniSpriteBox')
+  ].filter(Boolean);
 
-            for (const img of otherImgs) {
-                const oc = document.createElement('canvas');
-                oc.width = img.naturalWidth * 4;
-                oc.height = img.naturalHeight * 4;
-                const octx = oc.getContext('2d');
-                octx.imageSmoothingEnabled = false;
-                octx.drawImage(img, 0, 0, oc.width, oc.height);
-                const upscaledUrl = oc.toDataURL();
-                img.src = upscaledUrl;
-                await loadImage(upscaledUrl);
-                if (img.decode) {
-                    try {
-                        await img.decode();
-                    } catch (e) {}
-                }
-            }
+  const old = targets.map(el => [el, el.style.visibility]);
+  targets.forEach(el => { el.style.visibility = 'hidden'; });
 
-            const cardCanvas = await html2canvas(card, {
-                scale: scale,
-                useCORS: true,
-                backgroundColor: null,
-                imageTimeout: 0,
-            });
+  try {
+    await new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    );
 
-            // Restore preview state.
-            if (spriteImg && origSrc) spriteImg.src = origSrc;
-            if (miniSpriteImg && miniOrigSrc) miniSpriteImg.src = miniOrigSrc;
-            otherImgs.forEach((img, i) => img.src = otherOrigSrcs[i]);
-            card.style.transform = '';
-            bgTint.style.display = '';
-            bgImg.style.display = '';
+    return await html2canvas(card, {
+      scale,
+      useCORS: true,
+      backgroundColor: null,
+      imageTimeout: 0
+    });
+  } finally {
+    old.forEach(([el, value]) => { el.style.visibility = value; });
+  }
+}
 
-            // Final composition.
-            const final = document.createElement('canvas');
-            final.width = W;
-            final.height = H;
-            const ctx = final.getContext('2d');
+function drawDecodedSpriteFrame(ctx, frame, dx, dy, dw, dh) {
+  if (!frame) return;
 
-            ctx.imageSmoothingEnabled = false;
-            await new Promise(resolve => {
-                const img = new Image();
-                img.onload = () => {
-                    ctx.drawImage(img, 0, 0, W, H);
-                    resolve();
-                };
-                img.src = bgSrc;
-            });
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = frame.width;
+  frameCanvas.height = frame.height;
 
-            await new Promise(resolve => {
-                const maskImg = new Image();
-                maskImg.onload = () => {
-                    const oc = document.createElement('canvas');
-                    oc.width = W;
-                    oc.height = H;
-                    const octx = oc.getContext('2d', {
-                        willReadFrequently: true
-                    });
-                    octx.imageSmoothingEnabled = false;
-                    const maskCanvas = document.createElement('canvas');
-                    maskCanvas.width = W;
-                    maskCanvas.height = H;
-                    const mctx = maskCanvas.getContext('2d', {
-                        willReadFrequently: true
-                    });
-                    mctx.imageSmoothingEnabled = false;
-                    mctx.drawImage(maskImg, 0, 0, W, H);
-                    const maskData = mctx.getImageData(0, 0, W, H);
-                    drawMaskedColorWithShading(octx, maskData, W, H, accentColor);
-                    ctx.drawImage(oc, 0, 0);
-                    resolve();
-                };
-                maskImg.src = maskSrc;
-            });
+  const fctx = frameCanvas.getContext('2d');
+  fctx.imageSmoothingEnabled = false;
+  fctx.putImageData(
+    new ImageData(
+      new Uint8ClampedArray(frame.pixels),
+      frame.width,
+      frame.height
+    ),
+    0,
+    0
+  );
 
-            ctx.imageSmoothingEnabled = true;
-            ctx.drawImage(cardCanvas, 0, 0);
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(frameCanvas, dx, dy, dw, dh);
+  ctx.restore();
+}
 
-            return final;
-        }
+async function renderGifFrameDirect(staticCardCanvas, spriteFrame, miniFrame, scale = 2) {
+  const output = document.createElement('canvas');
+  output.width = staticCardCanvas.width;
+  output.height = staticCardCanvas.height;
+
+  const ctx = output.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(staticCardCanvas, 0, 0);
+
+  const card = document.getElementById('dex-card');
+  if (!card) return output;
+
+  const cardRect = card.getBoundingClientRect();
+
+  const drawArea = (area, frame) => {
+    if (!area || !frame) return;
+
+    const r = area.getBoundingClientRect();
+    drawDecodedSpriteFrame(
+      ctx,
+      frame,
+      (r.left - cardRect.left) * scale,
+      (r.top - cardRect.top) * scale,
+      r.width * scale,
+      r.height * scale
+    );
+  };
+
+  drawArea(document.getElementById('spriteArea'), spriteFrame);
+  drawArea(document.getElementById('miniSpriteBox'), miniFrame);
+
+  return output;
+}
+
 
         async function exportGif() {
             if (!bigSpriteGifData) return;
@@ -2580,9 +2678,8 @@
             const overlay = document.getElementById('renderOverlay');
             const overlayText = document.getElementById('renderOverlayText');
             exportBtn.disabled = true;
-
-            // Export overlay.
             overlay.classList.add('visible');
+
             const setStatus = (msg) => {
                 exportBtn.textContent = msg;
                 overlayText.textContent = msg;
@@ -2591,62 +2688,128 @@
             try {
                 const scale = parseInt(document.getElementById('exportScale').value);
                 const card = document.getElementById('dex-card');
-                const bgImg = document.getElementById('bgImg');
-                const accentColor = document.getElementById('colorAccent').value;
 
-                const hasForm = bgImg.src === BG_WITH_FORM;
-                const bgSrc = hasForm ? BG_WITH_FORM : BG_NO_FORM;
-                const maskSrc = hasForm ? UI_MASK_WITH_FORM : UI_MASK_NO_FORM;
+                setStatus('DECODING GIF...');
+                await new Promise(r => setTimeout(r, 0));
 
-                // Frame decoding.
                 const frames = decodeGifFrames(bigSpriteGifData);
                 if (!frames.length) {
                     throw new Error('Could not read any frames from that GIF file.');
                 }
-                const frameCount = Math.min(frames.length, 8);
-                const frameDelay = (frames[0] && frames[0].delay) ? frames[0].delay : 125;
 
-                // Mini sprite frames.
+                const frameCount = frames.length;
+
                 let miniFrames = [];
                 if (miniSpriteIsGif && miniSpriteGifData) {
                     miniFrames = decodeGifFrames(miniSpriteGifData);
                 }
 
-                const gifFrames = [];
-                for (let i = 0; i < frameCount; i++) {
-                    setStatus(`RENDERING FRAME ${i + 1}/${frameCount}...`);
-                    // Yield before frame rendering.
-                    await new Promise(r => setTimeout(r, 0));
-                    const frameDataUrl = frameToDataUrl(frames[i]);
-                    const miniFrameDataUrl = miniFrames.length ?
-                        frameToDataUrl(miniFrames[i % miniFrames.length]) :
-                        null;
-
-                    const canvas = await compositeFrame(
-                        card,
-                        frameDataUrl,
-                        scale,
-                        bgSrc,
-                        maskSrc,
-                        accentColor,
-                        miniFrameDataUrl
+                let miniTimeline = [];
+                if (miniFrames.length) {
+                    const miniTotalMs = miniFrames.reduce(
+                        (s, f) => s + (f.delay || 100), 0
                     );
+
+                    let elapsed = 0;
+                    for (let i = 0; i < frameCount; i++) {
+                        const t = elapsed % miniTotalMs;
+                        let acc = 0;
+                        let miniIdx = 0;
+
+                        for (let j = 0; j < miniFrames.length; j++) {
+                            acc += (miniFrames[j].delay || 100);
+                            if (t < acc) {
+                                miniIdx = j;
+                                break;
+                            }
+                        }
+
+                        miniTimeline.push(miniIdx);
+                        elapsed += (frames[i].delay || 100);
+                    }
+                }
+
+                setStatus('RENDERING STATIC CARD...');
+                await new Promise(r => setTimeout(r, 0));
+
+                const staticCardCanvas = await renderStaticCardForGif(scale);
+
+                const cardRect = card.getBoundingClientRect();
+                const spriteArea = document.getElementById('spriteArea');
+                const miniArea = document.getElementById('miniSpriteBox');
+                const spriteImg = spriteArea ? spriteArea.querySelector('img') : null;
+                const miniImg = miniArea ? miniArea.querySelector('img') : null;
+
+                const rectToGeometry = (el) => {
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    return {
+                        x: (r.left - cardRect.left) * scale,
+                        y: (r.top - cardRect.top) * scale,
+                        w: r.width * scale,
+                        h: r.height * scale
+                    };
+                };
+
+                const spriteGeometry = rectToGeometry(spriteImg);
+                const miniGeometry = rectToGeometry(miniImg);
+
+                const gifFrames = [];
+
+                for (let i = 0; i < frameCount; i++) {
+                    setStatus(`COMPOSITING FRAME ${i + 1}/${frameCount}...`);
+                    await new Promise(r => setTimeout(r, 0));
+
+                    const output = document.createElement('canvas');
+                    output.width = staticCardCanvas.width;
+                    output.height = staticCardCanvas.height;
+
+                    const ctx = output.getContext('2d');
+                    ctx.imageSmoothingEnabled = false;
+                    ctx.drawImage(staticCardCanvas, 0, 0);
+
+                    if (spriteGeometry) {
+                        drawDecodedSpriteFrame(
+                            ctx,
+                            frames[i],
+                            spriteGeometry.x,
+                            spriteGeometry.y,
+                            spriteGeometry.w,
+                            spriteGeometry.h
+                        );
+                    }
+
+                    if (miniGeometry && miniFrames.length) {
+                        drawDecodedSpriteFrame(
+                            ctx,
+                            miniFrames[miniTimeline[i]],
+                            miniGeometry.x,
+                            miniGeometry.y,
+                            miniGeometry.w,
+                            miniGeometry.h
+                        );
+                    }
+
                     gifFrames.push({
-                        canvas,
-                        delay: frameDelay
+                        canvas: output,
+                        delay: frames[i].delay || 100
                     });
                 }
 
                 setStatus('ENCODING GIF...');
-                // Encode status refresh
                 await new Promise(r => setTimeout(r, 50));
 
                 const blob = encodeGif(gifFrames);
                 if (!blob || !blob.size) {
                     throw new Error('GIF encoding produced an empty file.');
                 }
-                const filename = (document.getElementById('pokeName').value || 'pokemon')
-                    .replace(/\s+/g, '_') + '_dex_entry.gif';
+
+                const dexNum = (document.getElementById('dexNum').value || '0000')
+                    .replace(/\s+/g, '');
+                const pokeName = (document.getElementById('pokeName').value || 'pokemon')
+                    .replace(/\s+/g, '_');
+
+                const filename = dexNum + '_' + pokeName + '.gif';
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
                 a.download = filename;
@@ -2665,8 +2828,6 @@
             }
         }
 
-        // Mobile card scaling — keeps the card's internal layout intact
-        // by scaling the whole element rather than reflowing its contents
         function updateCardScale() {
             const CARD_W = 560;
             const wrapper = document.querySelector('.card-scale-wrapper');
@@ -2680,6 +2841,7 @@
         document.addEventListener('DOMContentLoaded', updateCardScale);
         updateCardScale();
     </script>
+
 </body>
 
 </html>
