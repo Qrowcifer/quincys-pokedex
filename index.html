@@ -97,11 +97,6 @@
             flex-shrink: 0;
         }
 
-        /* Overlay shown during GIF export to hide the frame-swap flashing
-   (rapid sprite swapping while html2canvas captures each frame can be
-   an epilepsy trigger, so we cover the whole page while it renders).
-   Lives at the body level — NOT inside #dex-card — so it's never part
-   of what html2canvas captures. */
         .render-overlay {
             position: fixed;
             inset: 0;
@@ -788,7 +783,83 @@
             }
         }
 
-        /* Poké Ball graphic */
+        /* Drag-and-drop highlight */
+        .upload-btn.drag-over {
+            background: #1a3a4a;
+            border-color: #5de0d8;
+            color: #5de0d8;
+        }
+
+        /* Format picker modal */
+        .format-modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+            background: rgba(10, 12, 16, 0.88);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .format-modal {
+            background: #16213e;
+            border: 2px solid #2a3a5a;
+            border-radius: 10px;
+            padding: 24px 28px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            min-width: 240px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+
+        .format-modal h3 {
+            font-family: 'PkmnRS', monospace;
+            font-size: 13px;
+            color: #5de0d8;
+            letter-spacing: 1px;
+            margin: 0 0 4px;
+        }
+
+        .format-modal-btns {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .format-modal-btn {
+            background: #0d1b2e;
+            border: 1px solid #2a6a7a;
+            border-radius: 4px;
+            color: #5de0d8;
+            font-family: 'PkmnRS', monospace;
+            font-size: 11px;
+            letter-spacing: 1px;
+            padding: 10px 16px;
+            cursor: pointer;
+            transition: background 0.12s;
+            text-align: left;
+        }
+
+        .format-modal-btn:hover {
+            background: #142030;
+        }
+
+        .format-modal-cancel {
+            background: none;
+            border: none;
+            color: #8ab4cc;
+            font-family: 'PkmnRS', monospace;
+            font-size: 10px;
+            letter-spacing: 1px;
+            cursor: pointer;
+            padding: 4px 0 0;
+            text-align: center;
+        }
+
+        .format-modal-cancel:hover {
+            color: #5de0d8;
+        }
 
         /* Autosave status */
         .autosave-status {
@@ -890,7 +961,6 @@
             <div style="font-family:'PkmnFL',monospace;font-size:9px;color:#456;letter-spacing:1px;margin-top:4px;">
                 560 × 315 PX
             </div>
-            <span class="autosave-status" id="autosaveStatus" aria-live="polite">Autosave ready</span>
         </div>
 
         <!-- CONTROLS -->
@@ -993,16 +1063,16 @@
 
             <hr class="divider">
             <h2>SPRITE</h2>
-            <label style="font-size: 12px; color: #8ab4cc;">Supports PNG, JPG/JPEG, WebP for Static Sprites, and GIF for Animated Sprites (8 Frames MAXIMUM)</label>
+            <label style="font-size: 12px; color: #8ab4cc;">Supports PNG, JPG/JPEG, WebP (static or animated), GIF (animated).</label>
 
-            <label class="upload-btn">
-                ↑ UPLOAD BIG SPRITE
+            <label class="upload-btn" id="bigSpriteDropZone">
+                CHOOSE OR DRAG THE BIG SPRITE FILE
                 <input type="file" id="bigSpriteUpload" accept="image/png,image/gif,image/jpeg,image/webp">
             </label>
             <button class="clear-sprite-btn" id="clearBigSprite">✕ Clear big sprite</button>
 
-            <label class="upload-btn">
-                ↑ UPLOAD MINI SPRITE
+            <label class="upload-btn" id="miniSpriteDropZone">
+                CHOOSE OR DRAG THE MINI SPRITE FILE
                 <input type="file" id="miniSpriteUpload" accept="image/png,image/gif,image/jpeg,image/webp">
             </label>
             <button class="clear-sprite-btn" id="clearMiniSprite">✕ Clear mini sprite</button>
@@ -1076,10 +1146,19 @@
             <span class="autosave-status" id="autosaveStatus" aria-live="polite">Autosave ready</span>
 
             <button class="reset-data-btn" id="resetDataBtn" type="button">RESET TO BULBASAUR</button>
-            <button class="export-btn" id="exportBtn">EXPORT POKÉDEX IMAGE</button>
-            <button class="export-gif-btn" id="exportGifBtn">EXPORT ANIMATED GIF</button>
+            <button class="export-btn" id="exportBtn">SAVE IMAGE AS…</button>
+            <button class="export-gif-btn" id="exportGifBtn">SAVE GIF</button>
 
         </div><!-- /controls -->
+    </div>
+
+    <!-- Format picker modal (hidden by default) -->
+    <div id="formatModal" class="format-modal-overlay" style="display:none;" role="dialog" aria-modal="true">
+        <div class="format-modal">
+            <h3 id="formatModalTitle">SAVE AS…</h3>
+            <div class="format-modal-btns" id="formatModalBtns"></div>
+            <button class="format-modal-cancel" id="formatModalCancel">Cancel</button>
+        </div>
     </div>
 
     <script>
@@ -1160,17 +1239,10 @@
             return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
         }
 
-        // Preview color layer
-        // The UI mask is a transparent PNG: its alpha channel defines exactly
-        // where the tint may appear, while luminance controls the tint's shading.
-        // #A8A8A8 (168) is the neutral point where the chosen accent color is
-        // reproduced unchanged.
         const PREVIEW_W = 560;
         const PREVIEW_H = 315;
         const PREVIEW_BASE_LUMA = 168;
 
-        // Cache the decoded mask pixels so dragging a color picker never has to
-        // recreate an Image/canvas or read the mask from the GPU again.
         const previewMaskCache = new Map();
 
         function decodeMask(maskImg, width = PREVIEW_W, height = PREVIEW_H) {
@@ -1274,8 +1346,6 @@
                 }
             }
 
-            // Replace the completed frame in one operation. There is no intermediate
-            // clear, so the old frame remains visible until the new frame is ready.
             ctx.putImageData(out, 0, 0);
         }
 
@@ -1312,8 +1382,6 @@
             const canvas = document.getElementById('bgTint');
             if (!canvas) return;
 
-            // Size the canvas only once. Resizing a canvas clears it, which was one of
-            // the causes of the visible flicker during rapid color-picker input.
             if (canvas.width !== PREVIEW_W || canvas.height !== PREVIEW_H) {
                 canvas.width = PREVIEW_W;
                 canvas.height = PREVIEW_H;
@@ -1326,9 +1394,7 @@
         function updateColors() {
             const accent = colorAccent.value;
             const shadow = colorShadow.value;
-            const accentDark = darkenHex(accent, 50);
             card.style.setProperty('--accent', accent);
-            card.style.setProperty('--accent-dark', accentDark);
             card.style.setProperty('--shadow', shadow);
             const hasForm = document.getElementById('formLabel').value.trim() !== '';
             updatePreviewTint(hasForm ? UI_MASK_WITH_FORM : UI_MASK_NO_FORM);
@@ -1406,25 +1472,84 @@
         let bigSpriteGifData = null;
         let miniSpriteIsGif = false;
         let miniSpriteGifData = null;
+        // Raw animated WebP data is kept separately and decoded only for GIF export.
+        let bigSpriteAnimWebpData = null;
+        let miniSpriteAnimWebpData = null;
 
-        document.getElementById('bigSpriteUpload').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-            bigSpriteIsGif = file.type === 'image/gif';
+        function updateAnimatedExportVisibility() {
             const gifBtn = document.getElementById('exportGifBtn');
-            if (bigSpriteIsGif) {
+            if (bigSpriteGifData || miniSpriteGifData || bigSpriteAnimWebpData || miniSpriteAnimWebpData) {
                 gifBtn.classList.add('visible');
-                // Raw GIF data.
-                const abReader = new FileReader();
-                abReader.onload = function(ev) {
-                    bigSpriteGifData = ev.target.result;
-                    scheduleAutosave();
-                };
-                abReader.readAsArrayBuffer(file);
+                gifBtn.textContent = 'SAVE GIF';
             } else {
                 gifBtn.classList.remove('visible');
-                bigSpriteGifData = null;
             }
+        }
+
+        function isWebp(file) { return (file.type || '').toLowerCase() === 'image/webp' || /\.webp$/i.test(file.name || ''); }
+
+        function isAnimatedWebp(buffer) {
+            try {
+                const bytes = new Uint8Array(buffer);
+                if (bytes.length < 16) return false;
+                const ascii = (a, b, c, d) => String.fromCharCode(bytes[a], bytes[b], bytes[c], bytes[d]);
+                if (ascii(0,1,2,3) !== 'RIFF' || ascii(8,9,10,11) !== 'WEBP') return false;
+                let pos = 12;
+                let hasAnim = false;
+                let anmfCount = 0;
+                while (pos + 8 <= bytes.length) {
+                    const type = ascii(pos, pos+1, pos+2, pos+3);
+                    const size = (bytes[pos+4] | (bytes[pos+5] << 8) | (bytes[pos+6] << 16) | (bytes[pos+7] << 24)) >>> 0;
+                    if (type === 'ANIM') hasAnim = true;
+                    else if (type === 'ANMF') anmfCount++;
+                    pos += 8 + size + (size & 1);
+                    if (pos > bytes.length) break;
+                }
+                return hasAnim && anmfCount > 0;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        async function decodeAnimatedWebpFrames(buffer) {
+            if (typeof ImageDecoder === 'undefined') throw new Error('Animated WebP decoding is not supported in this browser. Try a current Chromium-based browser.');
+            const decoder = new ImageDecoder({ data: buffer, type: 'image/webp' });
+
+            if (decoder.tracks && decoder.tracks.ready) await decoder.tracks.ready;
+            await decoder.completed;
+            const track = decoder.tracks && decoder.tracks.selectedTrack;
+            if (!track) {
+                decoder.close();
+                throw new Error('This browser detected the animated WebP but could not open its animation track.');
+            }
+            const count = track.frameCount || 1;
+            const frames = [];
+            for (let i = 0; i < count; i++) {
+                const result = await decoder.decode({ frameIndex: i, completeFramesOnly: true });
+                const vf = result.image;
+                const w = vf.displayWidth, h = vf.displayHeight;
+                const c = document.createElement('canvas'); c.width = w; c.height = h;
+                const ctx = c.getContext('2d'); ctx.drawImage(vf, 0, 0);
+                const pixels = ctx.getImageData(0, 0, w, h).data;
+                frames.push({ width:w, height:h, delay:Math.max(20, Math.round((vf.duration || 100000) / 1000)), pixels:new Uint8ClampedArray(pixels) });
+                vf.close();
+            }
+            decoder.close();
+            return frames;
+        }
+
+        function processBigSpriteFile(file) {
+            if (!file) return;
+            bigSpriteIsGif = file.type === 'image/gif';
+            bigSpriteGifData = null; bigSpriteAnimWebpData = null;
+            const abReader = new FileReader();
+            abReader.onload = async function(ev) {
+                if (bigSpriteIsGif) bigSpriteGifData = ev.target.result;
+                else if (isWebp(file) && isAnimatedWebp(ev.target.result)) bigSpriteAnimWebpData = ev.target.result;
+                updateAnimatedExportVisibility();
+                scheduleAutosave();
+            };
+            abReader.readAsArrayBuffer(file);
             const reader = new FileReader();
             reader.onload = function(ev) {
                 bigSpriteDataUrl = ev.target.result;
@@ -1432,25 +1557,20 @@
                 scheduleAutosave();
             };
             reader.readAsDataURL(file);
-        });
+        }
 
-        document.getElementById('miniSpriteUpload').addEventListener('change', function(e) {
-            const file = e.target.files[0];
+        function processMiniSpriteFile(file) {
             if (!file) return;
-
             miniSpriteIsGif = file.type === 'image/gif';
-
-            if (miniSpriteIsGif) {
-                const abReader = new FileReader();
-                abReader.onload = function(ev) {
-                    miniSpriteGifData = ev.target.result;
-                    scheduleAutosave();
-                };
-                abReader.readAsArrayBuffer(file);
-            } else {
-                miniSpriteGifData = null;
-            }
-
+            miniSpriteGifData = null; miniSpriteAnimWebpData = null;
+            const abReader = new FileReader();
+            abReader.onload = async function(ev) {
+                if (miniSpriteIsGif) miniSpriteGifData = ev.target.result;
+                else if (isWebp(file) && isAnimatedWebp(ev.target.result)) miniSpriteAnimWebpData = ev.target.result;
+                updateAnimatedExportVisibility();
+                scheduleAutosave();
+            };
+            abReader.readAsArrayBuffer(file);
             const reader = new FileReader();
             reader.onload = function(ev) {
                 miniSpriteDataUrl = ev.target.result;
@@ -1458,22 +1578,65 @@
                 scheduleAutosave();
             };
             reader.readAsDataURL(file);
+        }
+
+        document.getElementById('bigSpriteUpload').addEventListener('change', function(e) {
+            processBigSpriteFile(e.target.files[0]);
         });
+
+        document.getElementById('miniSpriteUpload').addEventListener('change', function(e) {
+            processMiniSpriteFile(e.target.files[0]);
+        });
+
+        // Drag and drop support
+        function setupDropZone(dropZoneId, processFileFn) {
+            const zone = document.getElementById(dropZoneId);
+            if (!zone) return;
+
+            zone.addEventListener('dragenter', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                zone.classList.add('drag-over');
+            });
+            zone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                zone.classList.add('drag-over');
+                e.dataTransfer.dropEffect = 'copy';
+            });
+            zone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                zone.classList.remove('drag-over');
+            });
+            zone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                zone.classList.remove('drag-over');
+                const file = e.dataTransfer.files[0];
+                if (file && /^image\/(png|gif|jpeg|webp)$/.test(file.type)) {
+                    processFileFn(file);
+                }
+            });
+        }
+
+        setupDropZone('bigSpriteDropZone', processBigSpriteFile);
+        setupDropZone('miniSpriteDropZone', processMiniSpriteFile);
 
         clearBigSpriteBtn.addEventListener('click', function() {
             bigSpriteDataUrl = null;
             bigSpriteIsGif = false;
-            bigSpriteGifData = null;
+            bigSpriteGifData = null; bigSpriteAnimWebpData = null;
             setBigSpriteImage(null);
             document.getElementById('bigSpriteUpload').value = '';
-            document.getElementById('exportGifBtn').classList.remove('visible');
+            updateAnimatedExportVisibility();
             scheduleAutosave();
         });
 
         clearMiniSpriteBtn.addEventListener('click', function() {
             miniSpriteDataUrl = null;
             miniSpriteIsGif = false;
-            miniSpriteGifData = null;
+            miniSpriteGifData = null; miniSpriteAnimWebpData = null;
             setMiniSpriteImage(null);
             document.getElementById('miniSpriteUpload').value = '';
             scheduleAutosave();
@@ -1608,11 +1771,6 @@
         syncColor('colorAccent', 'colorAccentHex', updateColors);
         syncColor('colorShadow', 'colorShadowHex', updateColors);
 
-        // Autosave / restore ---------------------------------------------------------
-        // Saves the editable state locally in this browser so reopening this HTML
-        // restores the previous entry. File inputs themselves cannot be restored by
-        // browsers for security reasons, so their selected image data is saved from
-        // the FileReader data URLs instead.
         const AUTOSAVE_KEY = 'pokedex-entry-generator-state:v1:' + (location.pathname || 'local');
         let autosaveTimer = null;
 
@@ -1657,7 +1815,7 @@
                 bigSpriteIsGif: !!bigSpriteIsGif,
                 miniSpriteIsGif: !!miniSpriteIsGif,
                 bigSpriteGifData: bigSpriteGifData ? arrayBufferToBase64(bigSpriteGifData) : null,
-                miniSpriteGifData: miniSpriteGifData ? arrayBufferToBase64(miniSpriteGifData) : null
+                miniSpriteGifData: miniSpriteGifData ? arrayBufferToBase64(miniSpriteGifData) : null,
             };
         }
 
@@ -1708,11 +1866,11 @@
                 bigSpriteGifData = state.bigSpriteGifData ? base64ToArrayBuffer(state.bigSpriteGifData) : null;
                 miniSpriteGifData = state.miniSpriteGifData ? base64ToArrayBuffer(state.miniSpriteGifData) : null;
 
-                // Keep the animated-GIF export control visible when a GIF sprite was
-                // restored from autosave. The upload change handler normally does this.
                 const restoredGifBtn = document.getElementById('exportGifBtn');
-                if (bigSpriteIsGif && bigSpriteGifData) restoredGifBtn.classList.add('visible');
-                else restoredGifBtn.classList.remove('visible');
+                if ((bigSpriteIsGif && bigSpriteGifData) || (miniSpriteIsGif && miniSpriteGifData)) {
+                    restoredGifBtn.classList.add('visible');
+                    restoredGifBtn.textContent = 'SAVE GIF';
+                } else restoredGifBtn.classList.remove('visible');
 
                 setAutosaveStatus('Restored previous entry', true);
                 return true;
@@ -1742,7 +1900,7 @@
                 pokeWT: '15.2 lbs.',
                 type1: 'grass',
                 type2: 'poison',
-                dexEntry: 'Pokémon Dex Entry',
+                dexEntry: 'BULBASAUR can be seen napping in bright sunlight. There is a seed on its back. By soaking up the sun’s rays, the seed grows progressively larger.',
                 formLabel: '',
                 showStar: false,
                 bigSize: '64',
@@ -1771,7 +1929,7 @@
                 else el.value = value;
             });
 
-            // Restore the embedded Bulbasaur sprites and remove uploaded GIF data.
+            // Restore the embedded Bulbasaur sprites and remove uploaded animated data.
             bigSpriteDataUrl = DEFAULT_BIG_SPRITE;
             miniSpriteDataUrl = DEFAULT_MINI_SPRITE;
             bigSpriteIsGif = false;
@@ -1781,8 +1939,6 @@
             document.getElementById('bigSpriteUpload').value = '';
             document.getElementById('miniSpriteUpload').value = '';
 
-            // Programmatic .value/.checked assignments do not fire the live input/change
-            // listeners, so explicitly synchronize every restored field into the preview.
             previewNum.textContent = document.getElementById('dexNum').value || '000';
             previewName.textContent = document.getElementById('pokeName').value || 'Name';
             previewTitle.textContent = document.getElementById('pokeTitle').value || 'Title Pokémon';
@@ -1798,14 +1954,13 @@
             setMiniSpriteImage(miniSpriteDataUrl);
             applyBigSpriteTransform();
             applyMiniSpriteTransform();
-            document.getElementById('exportGifBtn').classList.remove('visible');
+            updateAnimatedExportVisibility();
 
             clearAutosave();
             saveAutosaveNow();
             setAutosaveStatus('Reset to Bulbasaur defaults', true);
         }
 
-        // Save every normal editable control, including controls added later.
         [
             'dexNum', 'pokeName', 'pokeTitle', 'pokeHT', 'pokeWT', 'type1', 'type2', 'dexEntry',
             'formLabel', 'showStar', 'bigSize', 'bigSizeNum', 'bigX', 'bigXNum', 'bigY', 'bigYNum',
@@ -1818,7 +1973,6 @@
             el.addEventListener('change', scheduleAutosave);
         });
 
-        // Restore before the normal initialization/render pass.
         restoreAutosave();
 
         document.getElementById('resetDataBtn').addEventListener('click', resetToDefaults);
@@ -1830,8 +1984,6 @@
         setBigSpriteImage(bigSpriteDataUrl);
         setMiniSpriteImage(miniSpriteDataUrl);
 
-        // Autosave restores control values programmatically, so input/change listeners
-        // do not fire. Explicitly synchronize the restored values into the preview.
         previewNum.textContent = document.getElementById('dexNum').value || '000';
         previewName.textContent = document.getElementById('pokeName').value || 'Name';
         previewTitle.textContent = document.getElementById('pokeTitle').value || 'Title Pokémon';
@@ -1839,18 +1991,49 @@
         previewWT.textContent = document.getElementById('pokeWT').value || '0.0 lbs.';
         previewEntry.textContent = document.getElementById('dexEntry').value || '...';
         previewStar.style.visibility = document.getElementById('showStar').checked ? 'visible' : 'hidden';
-        updateColors();
-        buildTypeBadges();
-        updateFormLabel();
-        setBigSpriteImage(bigSpriteDataUrl);
-        setMiniSpriteImage(miniSpriteDataUrl);
+        // ---- Format picker modal ----
+        function showFormatModal(title, options) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('formatModal');
+                const modalTitle = document.getElementById('formatModalTitle');
+                const btns = document.getElementById('formatModalBtns');
+                const cancel = document.getElementById('formatModalCancel');
+
+                modalTitle.textContent = title;
+                btns.innerHTML = '';
+
+                options.forEach(({ label, value }) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'format-modal-btn';
+                    btn.textContent = label;
+                    btn.addEventListener('click', () => {
+                        modal.style.display = 'none';
+                        resolve(value);
+                    });
+                    btns.appendChild(btn);
+                });
+
+                const onCancel = () => {
+                    modal.style.display = 'none';
+                    cancel.removeEventListener('click', onCancel);
+                    resolve(null);
+                };
+                cancel.addEventListener('click', onCancel);
+
+                modal.style.display = 'flex';
+            });
+        }
 
         // Image export
-        document.getElementById('exportBtn').addEventListener('click', exportImage);
+        document.getElementById('exportBtn').addEventListener('click', async () => {
+            const fmt = await showFormatModal('SAVE IMAGE AS…', [
+                { label: '📷  PNG  — lossless, best quality', value: 'png' },
+                { label: '📷  JPG  — smaller file, lossy', value: 'jpg' },
+                { label: '📷  WebP — best compression', value: 'webp' },
+            ]);
+            if (fmt) exportImage(fmt);
+        });
 
-        // Pre-scale every image with nearest-neighbour sampling before html2canvas
-        // captures the card. html2canvas does not reliably preserve CSS
-        // image-rendering: pixelated when it rasterizes small pixel-art sprites.
         async function crispScaleImages(card) {
             const imgs = Array.from(card.querySelectorAll('img'));
             const origSrcs = imgs.map(img => img.src);
@@ -1882,14 +2065,7 @@
             return origSrcs;
         }
 
-        function restoreImages(card, origSrcs) {
-            const imgs = Array.from(card.querySelectorAll('img'));
-            imgs.forEach((img, i) => {
-                if (origSrcs[i]) img.src = origSrcs[i];
-            });
-        }
-
-        async function exportImage() {
+        async function exportImage(format = 'png') {
             const scale = parseInt(document.getElementById('exportScale').value);
             const card = document.getElementById('dex-card');
             const W = 560 * scale;
@@ -1902,9 +2078,6 @@
             const bgSrc = hasForm ? BG_WITH_FORM : BG_NO_FORM;
             const maskSrc = hasForm ? UI_MASK_WITH_FORM : UI_MASK_NO_FORM;
 
-            // Hide the bg layers so html2canvas only captures the UI elements on top.
-            // Reset any responsive transform so the export is rendered at the card's
-            // native CSS dimensions before html2canvas applies the requested scale.
             card.style.transform = 'scale(1)';
             bgTint.style.display = 'none';
             bgImg.style.display = 'none';
@@ -1912,8 +2085,7 @@
             let origSrcs = null;
             let cardCanvas;
             try {
-                // html2canvas can blur small pixel-art images, so give it already-crisp
-                // nearest-neighbour versions of every image in the card.
+
                 origSrcs = await crispScaleImages(card);
 
                 cardCanvas = await html2canvas(card, {
@@ -1923,8 +2095,13 @@
                     imageTimeout: 0,
                 });
             } finally {
-                // Always restore the live preview, even if html2canvas throws.
-                if (origSrcs) restoreImages(card, origSrcs);
+
+                if (origSrcs) {
+                    const imgs = Array.from(card.querySelectorAll('img'));
+                    imgs.forEach((img, i) => {
+                        if (origSrcs[i]) img.src = origSrcs[i];
+                    });
+                }
                 bgTint.style.display = '';
                 bgImg.style.display = '';
                 card.style.transform = '';
@@ -1970,19 +2147,22 @@
 
             const dexNum = (document.getElementById('dexNum').value || '0000').replace(/\s+/g, '');
             const pokeName = (document.getElementById('pokeName').value || 'pokemon').replace(/\s+/g, '_');
-            const filename = dexNum + '_' + pokeName + '.png';
+            const mimeMap = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
+            const extMap = { png: 'png', jpg: 'jpg', webp: 'webp' };
+            const mimeType = mimeMap[format] || 'image/png';
+            const ext = extMap[format] || 'png';
+            const quality = format === 'jpg' ? 0.92 : format === 'webp' ? 0.92 : undefined;
+            const filename = dexNum + '_' + pokeName + '.' + ext;
             final.toBlob(blob => {
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
                 a.download = filename;
                 a.click();
                 URL.revokeObjectURL(a.href);
-            });
+            }, mimeType, quality);
         }
 
         // GIF decoder
-        // Parses a GIF ArrayBuffer and returns an array of
-        // { width, height, delay, pixels: Uint8ClampedArray RGBA } frames.
         function decodeGifFrames(buffer) {
             const bytes = new Uint8Array(buffer);
             let pos = 0;
@@ -2025,9 +2205,6 @@
                 disposal: 0
             };
 
-            // This canvas holds the actual GIF "screen". GIF frames are often
-            // only small rectangles, so each frame must be composited on top
-            // of the previous screen rather than treated as a complete image.
             const accumCanvas = document.createElement('canvas');
             accumCanvas.width = screenW;
             accumCanvas.height = screenH;
@@ -2079,19 +2256,11 @@
                     }
                     const indices = lzwDecode(minCode, new Uint8Array(dataBytes));
 
-                    // GIF disposal method 3 means "restore to previous".
-                    // Save the screen BEFORE drawing this frame so it can be
-                    // restored after the frame has been captured.
                     let savedBeforeFrame = null;
                     if (gce.disposal === 3) {
                         savedBeforeFrame = accumCtx.getImageData(0, 0, screenW, screenH);
                     }
 
-                    // Build a transparent RGBA image for just this frame's
-                    // rectangle. Transparent GIF pixels are left transparent.
-                    // We then use drawImage() for compositing, because
-                    // putImageData() would overwrite existing pixels with
-                    // transparent black instead of leaving them untouched.
                     const frameCanvas = document.createElement('canvas');
                     frameCanvas.width = imgW;
                     frameCanvas.height = imgH;
@@ -2110,9 +2279,6 @@
                             const idx = indices[srcRow * imgW + col];
                             const dst = (row * imgW + col) * 4;
 
-                            // A transparent GIF pixel means "leave the
-                            // destination pixel alone", not "replace it with
-                            // transparent black".
                             if (idx === gce.transparentIndex) continue;
 
                             framePixels[dst] = ct[idx * 3];
@@ -2124,11 +2290,8 @@
 
                     frameCtx.putImageData(frameImage, 0, 0);
 
-                    // Composite the frame onto the existing GIF screen.
                     accumCtx.drawImage(frameCanvas, imgLeft, imgTop);
 
-                    // Capture the frame AFTER compositing it, before applying
-                    // its disposal method.
                     const snap = accumCtx.getImageData(0, 0, screenW, screenH);
 
                     frames.push({
@@ -2138,13 +2301,8 @@
                         pixels: new Uint8ClampedArray(snap.data),
                     });
 
-                    // Apply the CURRENT frame's disposal AFTER it has been
-                    // captured. This state is what the next GIF frame should
-                    // start from.
                     if (gce.disposal === 2) {
-                        // For the transparent sprite GIFs used by this app,
-                        // restoring the affected rectangle to transparent is
-                        // the desired equivalent of GIF disposal "background".
+
                         accumCtx.clearRect(imgLeft, imgTop, imgW, imgH);
                     } else if (gce.disposal === 3 && savedBeforeFrame) {
                         accumCtx.putImageData(savedBeforeFrame, 0, 0);
@@ -2178,20 +2336,7 @@
         }
 
         function lzwDecode(minCodeSize, data) {
-            // GIF LZW decoder.
-            //
-            // Important details:
-            //   - Codes are packed LSB-first.
-            //   - The dictionary starts with clear + EOI codes.
-            //   - The code width grows as the NEXT dictionary code crosses
-            //     a power-of-two boundary.
-            //   - A clear code completely resets the dictionary and code width.
-            //   - The special KwKwK case (code === nextCode) is valid and must
-            //     be decoded as previousEntry + previousEntry[0].
-            //
-            // This is deliberately kept independent of the GIF compositor so
-            // that malformed LZW data cannot leave stale state from a previous
-            // frame behind.
+
             if (!Number.isInteger(minCodeSize) || minCodeSize < 2 || minCodeSize > 8) {
                 throw new Error('Invalid GIF LZW minimum code size: ' + minCodeSize);
             }
@@ -2212,14 +2357,13 @@
                 for (let i = 0; i < clearCode; i++) {
                     dictionary[i] = [i];
                 }
-                // clearCode and eoiCode are control codes, not dictionary entries.
+
                 dictionary[clearCode] = null;
                 dictionary[eoiCode] = null;
             };
 
             reset();
 
-            // GIF image data stores each code least-significant-bit first.
             let bitBuffer = 0;
             let bitCount = 0;
             let bytePos = 0;
@@ -2230,8 +2374,6 @@
                     bitCount += 8;
                 }
 
-                // A truncated data stream should terminate cleanly rather than
-                // manufacturing a code from missing bits.
                 if (bitCount < codeSize) return null;
 
                 const mask = (1 << codeSize) - 1;
@@ -2275,9 +2417,6 @@
                     dictionary[nextCode] = previousEntry.concat(entry[0]);
                     nextCode++;
 
-                    // The decoder must increase its code width only AFTER the
-                    // new dictionary entry has crossed the current width's
-                    // boundary. This keeps it synchronized with the encoder.
                     if (nextCode === (1 << codeSize) && codeSize < 12) {
                         codeSize++;
                     }
@@ -2290,7 +2429,7 @@
         }
 
         // GIF encoder
-        // Encodes an array of { canvas, delay } into an animated GIF Blob.
+
         function encodeGif(frames) {
             // Octets builder
             const out = [];
@@ -2347,7 +2486,7 @@
                 byte(0x21);
                 byte(0xF9);
                 byte(4);
-                byte(0x00); 
+                byte(0x00); // no disposal, no transparency
                 word(Math.round(fd / 10)); // delay in centiseconds
                 byte(0);
                 byte(0);
@@ -2515,18 +2654,117 @@
             return output;
         }
 
-        // Animated GIF export
-        document.getElementById('exportGifBtn').addEventListener('click', exportGif);
+        document.getElementById('exportGifBtn').addEventListener('click', async () => {
+            await exportGif();
+        });
 
-        function frameToDataUrl(frame) {
-            const canvas = document.createElement('canvas');
-            canvas.width = frame.width;
-            canvas.height = frame.height;
-            const ctx = canvas.getContext('2d');
-            const imageData = ctx.createImageData(frame.width, frame.height);
-            imageData.data.set(frame.pixels);
-            ctx.putImageData(imageData, 0, 0);
-            return canvas.toDataURL('image/png');
+        async function exportGif() {
+            const hasBigGif = !!bigSpriteGifData;
+            const hasMiniGif = !!miniSpriteGifData;
+            const hasBigAnim = !!bigSpriteAnimWebpData;
+            const hasMiniAnim = !!miniSpriteAnimWebpData;
+            if (!hasBigGif && !hasMiniGif && !hasBigAnim && !hasMiniAnim) return;
+
+            const exportBtn = document.getElementById('exportGifBtn');
+            const overlay = document.getElementById('renderOverlay');
+            const overlayText = document.getElementById('renderOverlayText');
+            exportBtn.disabled = true;
+            overlay.classList.add('visible');
+            const setStatus = (msg) => { exportBtn.textContent = msg; overlayText.textContent = msg; };
+
+            try {
+                const scale = parseInt(document.getElementById('exportScale').value);
+                const card = document.getElementById('dex-card');
+                setStatus('DECODING GIF...');
+                await new Promise(r => setTimeout(r, 0));
+
+                const driverIsBig = hasBigGif || hasBigAnim;
+                const frames = driverIsBig
+                    ? (hasBigGif ? decodeGifFrames(bigSpriteGifData) : await decodeAnimatedWebpFrames(bigSpriteAnimWebpData))
+                    : (hasMiniGif ? decodeGifFrames(miniSpriteGifData) : await decodeAnimatedWebpFrames(miniSpriteAnimWebpData));
+                if (!frames.length) throw new Error('Could not read any frames from that GIF file.');
+                const miniFrames = hasMiniGif ? decodeGifFrames(miniSpriteGifData) : (hasMiniAnim ? await decodeAnimatedWebpFrames(miniSpriteAnimWebpData) : []);
+
+                let miniTimeline = [];
+                if (driverIsBig && miniFrames.length) {
+                    const miniTotalMs = miniFrames.reduce((sum, f) => sum + (f.delay || 100), 0);
+                    let elapsed = 0;
+                    for (let i = 0; i < frames.length; i++) {
+                        const t = elapsed % miniTotalMs;
+                        let acc = 0, miniIdx = 0;
+                        for (let j = 0; j < miniFrames.length; j++) {
+                            acc += (miniFrames[j].delay || 100);
+                            if (t < acc) { miniIdx = j; break; }
+                        }
+                        miniTimeline.push(miniIdx);
+                        elapsed += (frames[i].delay || 100);
+                    }
+                }
+
+                setStatus('RENDERING STATIC CARD...');
+                await new Promise(r => setTimeout(r, 0));
+                const staticCardCanvas = await renderStaticCardForGif(scale);
+                const cardRect = card.getBoundingClientRect();
+                const spriteImg = document.querySelector('#spriteArea img');
+                const miniImg = document.querySelector('#miniSpriteBox img');
+                const rectToGeometry = (el) => {
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    return { x:(r.left-cardRect.left)*scale, y:(r.top-cardRect.top)*scale, w:r.width*scale, h:r.height*scale };
+                };
+                const spriteGeometry = rectToGeometry(spriteImg);
+                const miniGeometry = rectToGeometry(miniImg);
+                const typeImages = Array.from(document.querySelectorAll('#previewTypes .type-badge-icon'));
+                const typeGeometries = typeImages.map(img => ({
+                    src: img.src,
+                    geometry: rectToGeometry(img)
+                })).filter(item => item.geometry);
+
+                const gifFrames = [];
+
+                for (let i = 0; i < frames.length; i++) {
+                    setStatus(`COMPOSITING FRAME ${i + 1}/${frames.length}...`);
+                    await new Promise(r => setTimeout(r, 0));
+                    const output = document.createElement('canvas');
+                    output.width = staticCardCanvas.width;
+                    output.height = staticCardCanvas.height;
+                    const ctx = output.getContext('2d');
+                    ctx.imageSmoothingEnabled = false;
+                    ctx.drawImage(staticCardCanvas, 0, 0);
+                    if (driverIsBig && spriteGeometry) {
+                        drawDecodedSpriteFrame(ctx, frames[i], spriteGeometry.x, spriteGeometry.y, spriteGeometry.w, spriteGeometry.h);
+                    }
+                    if (miniGeometry && miniFrames.length) {
+                        const mf = driverIsBig ? miniFrames[miniTimeline[i]] : frames[i];
+                        drawDecodedSpriteFrame(ctx, mf, miniGeometry.x, miniGeometry.y, miniGeometry.w, miniGeometry.h);
+                    }
+                    for (const item of typeGeometries) {
+                        const g = item.geometry;
+                        await drawPixelImage(ctx, item.src, g.x, g.y, g.w, g.h);
+                    }
+
+                    gifFrames.push({ canvas: output, delay: frames[i].delay || 100 });
+                }
+
+                setStatus('ENCODING GIF...');
+                await new Promise(r => setTimeout(r, 50));
+                const blob = encodeGif(gifFrames);
+                if (!blob || !blob.size) throw new Error('GIF encoding produced an empty file.');
+                const dexNum = (document.getElementById('dexNum').value || '0000').replace(/\s+/g, '');
+                const pokeName = (document.getElementById('pokeName').value || 'pokemon').replace(/\s+/g, '_');
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = dexNum + '_' + pokeName + '.gif';
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            } catch (err) {
+                console.error('GIF export failed:', err);
+                alert('GIF export failed: ' + (err && err.message ? err.message : err));
+            } finally {
+                overlay.classList.remove('visible');
+                exportBtn.textContent = 'SAVE GIF';
+                exportBtn.disabled = false;
+            }
         }
 
         function loadImage(src) {
@@ -2538,58 +2776,14 @@
             });
         }
 
-        async function prepareSpriteFrame(img, frameDataUrl) {
-            if (!img || !frameDataUrl) return img;
-
-            const frameImg = await loadImage(frameDataUrl);
-            const canvas = document.createElement('canvas');
-            canvas.width = frameImg.naturalWidth * 4;
-            canvas.height = frameImg.naturalHeight * 4;
-
-            const ctx = canvas.getContext('2d');
-            ctx.imageSmoothingEnabled = false;
-            ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
-
-            const upscaledUrl = canvas.toDataURL('image/png');
-            const freshImg = img.cloneNode(true);
-
-            freshImg.removeAttribute('srcset');
-            freshImg.removeAttribute('sizes');
-            freshImg.src = upscaledUrl;
-
-            img.replaceWith(freshImg);
-
-            await loadImage(upscaledUrl);
-            if (freshImg.decode) {
-                try {
-                    await freshImg.decode();
-                } catch (e) {}
-            }
-
-            void freshImg.offsetWidth;
-            return freshImg;
-        }
-
-        async function compositeFrame(frameDataUrl, frameIndex, totalFrames, scale = 2) {
-
-  const card = document.getElementById('dex-card');
-  if (!card) throw new Error('Card preview not found');
-
-  return await html2canvas(card, {
-    scale,
-    useCORS: true,
-    backgroundColor: null,
-    imageTimeout: 0
-  });
-}
-
 async function renderStaticCardForGif(scale = 2) {
   const card = document.getElementById('dex-card');
   if (!card) throw new Error('Card preview not found');
 
   const targets = [
     document.getElementById('spriteArea'),
-    document.getElementById('miniSpriteBox')
+    document.getElementById('miniSpriteBox'),
+    document.getElementById('previewTypes')
   ].filter(Boolean);
 
   const old = targets.map(el => [el, el.style.visibility]);
@@ -2636,197 +2830,20 @@ function drawDecodedSpriteFrame(ctx, frame, dx, dy, dw, dh) {
   ctx.restore();
 }
 
-async function renderGifFrameDirect(staticCardCanvas, spriteFrame, miniFrame, scale = 2) {
-  const output = document.createElement('canvas');
-  output.width = staticCardCanvas.width;
-  output.height = staticCardCanvas.height;
-
-  const ctx = output.getContext('2d');
+async function drawPixelImage(ctx, src, dx, dy, dw, dh) {
+  if (!src) return;
+  const img = await loadImage(src);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+  const cctx = canvas.getContext('2d');
+  cctx.imageSmoothingEnabled = false;
+  cctx.drawImage(img, 0, 0);
+  ctx.save();
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(staticCardCanvas, 0, 0);
-
-  const card = document.getElementById('dex-card');
-  if (!card) return output;
-
-  const cardRect = card.getBoundingClientRect();
-
-  const drawArea = (area, frame) => {
-    if (!area || !frame) return;
-
-    const r = area.getBoundingClientRect();
-    drawDecodedSpriteFrame(
-      ctx,
-      frame,
-      (r.left - cardRect.left) * scale,
-      (r.top - cardRect.top) * scale,
-      r.width * scale,
-      r.height * scale
-    );
-  };
-
-  drawArea(document.getElementById('spriteArea'), spriteFrame);
-  drawArea(document.getElementById('miniSpriteBox'), miniFrame);
-
-  return output;
+  ctx.drawImage(canvas, dx, dy, dw, dh);
+  ctx.restore();
 }
-
-
-        async function exportGif() {
-            if (!bigSpriteGifData) return;
-
-            const exportBtn = document.getElementById('exportGifBtn');
-            const overlay = document.getElementById('renderOverlay');
-            const overlayText = document.getElementById('renderOverlayText');
-            exportBtn.disabled = true;
-            overlay.classList.add('visible');
-
-            const setStatus = (msg) => {
-                exportBtn.textContent = msg;
-                overlayText.textContent = msg;
-            };
-
-            try {
-                const scale = parseInt(document.getElementById('exportScale').value);
-                const card = document.getElementById('dex-card');
-
-                setStatus('DECODING GIF...');
-                await new Promise(r => setTimeout(r, 0));
-
-                const frames = decodeGifFrames(bigSpriteGifData);
-                if (!frames.length) {
-                    throw new Error('Could not read any frames from that GIF file.');
-                }
-
-                const frameCount = frames.length;
-
-                let miniFrames = [];
-                if (miniSpriteIsGif && miniSpriteGifData) {
-                    miniFrames = decodeGifFrames(miniSpriteGifData);
-                }
-
-                let miniTimeline = [];
-                if (miniFrames.length) {
-                    const miniTotalMs = miniFrames.reduce(
-                        (s, f) => s + (f.delay || 100), 0
-                    );
-
-                    let elapsed = 0;
-                    for (let i = 0; i < frameCount; i++) {
-                        const t = elapsed % miniTotalMs;
-                        let acc = 0;
-                        let miniIdx = 0;
-
-                        for (let j = 0; j < miniFrames.length; j++) {
-                            acc += (miniFrames[j].delay || 100);
-                            if (t < acc) {
-                                miniIdx = j;
-                                break;
-                            }
-                        }
-
-                        miniTimeline.push(miniIdx);
-                        elapsed += (frames[i].delay || 100);
-                    }
-                }
-
-                setStatus('RENDERING STATIC CARD...');
-                await new Promise(r => setTimeout(r, 0));
-
-                const staticCardCanvas = await renderStaticCardForGif(scale);
-
-                const cardRect = card.getBoundingClientRect();
-                const spriteArea = document.getElementById('spriteArea');
-                const miniArea = document.getElementById('miniSpriteBox');
-                const spriteImg = spriteArea ? spriteArea.querySelector('img') : null;
-                const miniImg = miniArea ? miniArea.querySelector('img') : null;
-
-                const rectToGeometry = (el) => {
-                    if (!el) return null;
-                    const r = el.getBoundingClientRect();
-                    return {
-                        x: (r.left - cardRect.left) * scale,
-                        y: (r.top - cardRect.top) * scale,
-                        w: r.width * scale,
-                        h: r.height * scale
-                    };
-                };
-
-                const spriteGeometry = rectToGeometry(spriteImg);
-                const miniGeometry = rectToGeometry(miniImg);
-
-                const gifFrames = [];
-
-                for (let i = 0; i < frameCount; i++) {
-                    setStatus(`COMPOSITING FRAME ${i + 1}/${frameCount}...`);
-                    await new Promise(r => setTimeout(r, 0));
-
-                    const output = document.createElement('canvas');
-                    output.width = staticCardCanvas.width;
-                    output.height = staticCardCanvas.height;
-
-                    const ctx = output.getContext('2d');
-                    ctx.imageSmoothingEnabled = false;
-                    ctx.drawImage(staticCardCanvas, 0, 0);
-
-                    if (spriteGeometry) {
-                        drawDecodedSpriteFrame(
-                            ctx,
-                            frames[i],
-                            spriteGeometry.x,
-                            spriteGeometry.y,
-                            spriteGeometry.w,
-                            spriteGeometry.h
-                        );
-                    }
-
-                    if (miniGeometry && miniFrames.length) {
-                        drawDecodedSpriteFrame(
-                            ctx,
-                            miniFrames[miniTimeline[i]],
-                            miniGeometry.x,
-                            miniGeometry.y,
-                            miniGeometry.w,
-                            miniGeometry.h
-                        );
-                    }
-
-                    gifFrames.push({
-                        canvas: output,
-                        delay: frames[i].delay || 100
-                    });
-                }
-
-                setStatus('ENCODING GIF...');
-                await new Promise(r => setTimeout(r, 50));
-
-                const blob = encodeGif(gifFrames);
-                if (!blob || !blob.size) {
-                    throw new Error('GIF encoding produced an empty file.');
-                }
-
-                const dexNum = (document.getElementById('dexNum').value || '0000')
-                    .replace(/\s+/g, '');
-                const pokeName = (document.getElementById('pokeName').value || 'pokemon')
-                    .replace(/\s+/g, '_');
-
-                const filename = dexNum + '_' + pokeName + '.gif';
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-
-            } catch (err) {
-                console.error('GIF export failed:', err);
-                alert('GIF export failed: ' + (err && err.message ? err.message : err));
-            } finally {
-                overlay.classList.remove('visible');
-                exportBtn.textContent = 'EXPORT ANIMATED GIF';
-                exportBtn.disabled = false;
-            }
-        }
 
         function updateCardScale() {
             const CARD_W = 560;
